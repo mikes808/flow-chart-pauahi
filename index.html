@@ -52,6 +52,16 @@ header { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justi
 .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; min-width: 110px; }
 .tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .tile .v { font-family: var(--font-mono); font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.tile.proj { border-color: var(--accent); min-width: 200px; }
+.tile.proj .v { font-family: var(--font-body); font-weight: 600; font-size: 19px; }
+.tile .sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tile .sub.warn { color: var(--decision); }
+.datebox { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; border-top: 1px dashed var(--line); padding-top: 8px; font-size: 13px; color: var(--muted); }
+.datebox span { display: inline-flex; align-items: center; gap: 6px; }
+.datebox input[type="date"], .datebox input[type="time"] { font-size: 13px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); padding: 3px 6px; color: var(--ink); font-family: var(--font-mono); }
+.datebox input:focus { outline: none; border-color: var(--accent); }
+.datebox .fin { margin-left: auto; color: var(--ink); }
+.datebox .fin b { color: var(--accent); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 button, select, input, textarea { font-family: inherit; font-size: 14px; color: var(--ink); }
@@ -186,6 +196,7 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
       <p class="hint">Click any text to edit it and set a duration on each step. Use <b>Branch</b> on a step to start a second chain from it, then pick where the chains rejoin. Use + between steps to insert one.</p>
     </div>
     <div class="summary">
+      <div class="tile proj"><div class="k">Projected completion</div><div class="v" id="projDate">-</div><div class="sub" id="projWin"></div></div>
       <div class="tile"><div class="k">Longest path</div><div class="v" id="totTime">0m</div></div>
       <div class="tile"><div class="k">Steps</div><div class="v" id="totSteps">0</div></div>
     </div>
@@ -261,10 +272,17 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     try {
       let s = JSON.parse(localStorage.getItem(KEY));
       if (!s) { const o = JSON.parse(localStorage.getItem(OLD_KEY)); if (o && Array.isArray(o.steps)) s = { title: o.title, items: o.steps.map(x => Object.assign({ kind: "step" }, x)) }; }
-      if (s && Array.isArray(s.items)) { uid = maxId(s.items) + 1; return s; }
+      if (s && Array.isArray(s.items)) { uid = maxId(s.items) + 1; return withDefaults(s); }
     } catch (e) {}
     uid = 1;
-    return { title: "New Customer Onboarding", items: template() };
+    return withDefaults({ title: "New Customer Onboarding", items: template() });
+  }
+  function todayISO() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+  function withDefaults(s) {
+    if (s.startDate === undefined) s.startDate = todayISO();
+    if (!s.startTime) s.startTime = "09:00";
+    if (s.skipWeekends === undefined) s.skipWeekends = true;
+    return s;
   }
   function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
 
@@ -285,6 +303,73 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     }
     return t;
   }
+  // Shortest way through: either/or chains take the quickest one.
+  function computeMin(items, start) {
+    let t = start;
+    for (const it of items) t = isSplit(it) ? Math.min(...it.branches.map(b => computeMin(b, t))) : t + minutes(it);
+    return t;
+  }
+
+  // ---------- Calendar ----------
+  // Work time runs on a working calendar: 8-hour days from the chosen start time, weekdays only unless weekends count.
+  const DAY = 480;
+  function startMoment() {
+    if (!state.startDate) return null;
+    const [y, m, d] = state.startDate.split("-").map(Number);
+    const [hh, mi] = (state.startTime || "09:00").split(":").map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d, hh || 0, mi || 0);
+  }
+  function calendar() {
+    const [sh, sm] = (state.startTime || "09:00").split(":").map(Number);
+    const dayStart = d => new Date(d.getFullYear(), d.getMonth(), d.getDate(), sh || 0, sm || 0);
+    const dayEnd = d => new Date(dayStart(d).getTime() + DAY * 60000);
+    const isWork = d => !state.skipWeekends || (d.getDay() !== 0 && d.getDay() !== 6);
+    const nextDay = d => { let n = dayStart(d); do { n = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, sh || 0, sm || 0); } while (!isWork(n)); return n; };
+    function norm(c) { if (!isWork(c) || c >= dayEnd(c)) return nextDay(c); if (c < dayStart(c)) return dayStart(c); return c; }
+    // forStart: a step that would begin at closing time begins the next working morning instead.
+    function add(start, mins, forStart) {
+      let c = norm(new Date(start));
+      let left = mins;
+      while (left > 0) {
+        const room = (dayEnd(c) - c) / 60000;
+        if (left <= room) { c = new Date(c.getTime() + left * 60000); left = 0; }
+        else { left -= room; c = nextDay(c); }
+      }
+      if (forStart && c >= dayEnd(c)) c = nextDay(c);
+      return c;
+    }
+    return { add };
+  }
+  const sameYear = d => d.getFullYear() === new Date().getFullYear();
+  const fmtDate = (d, long) => d.toLocaleDateString(undefined, Object.assign({ month: "short", day: "numeric" }, long ? { weekday: "short" } : {}, sameYear(d) ? {} : { year: "numeric" }));
+  const fmtTime = d => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  function startsText(id) {
+    const base = "starts +" + fmt(times[id] || 0);
+    const s0 = startMoment(); if (!s0) return base;
+    return base + " \u00b7 " + fmtDate(calendar().add(s0, times[id] || 0, true), true);
+  }
+  function projection(total) {
+    const s0 = startMoment();
+    if (!s0) return null;
+    const cal = calendar(), late = cal.add(s0, total), early = cal.add(s0, computeMin(state.items, 0));
+    return { early, late, start: cal.add(s0, 0, true) };
+  }
+  function updateProjection(total) {
+    const pd = document.getElementById("projDate"), pw = document.getElementById("projWin");
+    const pr = projection(total);
+    pw.classList.remove("warn");
+    if (!firstStart()) { pd.textContent = "-"; pw.textContent = "Add a Start step to set a start date"; pw.classList.add("warn"); }
+    else if (!pr) { pd.textContent = "-"; pw.textContent = "Set a start date in the Start step"; pw.classList.add("warn"); }
+    else {
+      pd.textContent = fmtDate(pr.late, true) + ", " + fmtTime(pr.late);
+      pw.textContent = pr.early.getTime() === pr.late.getTime() ? "Single path, no variation" : `Window ${fmtDate(pr.early)} - ${fmtDate(pr.late)} (shortest to longest path)`;
+    }
+    const fin = document.getElementById("finInStart");
+    if (fin) fin.textContent = pr ? fmtDate(pr.late, true) + ", " + fmtTime(pr.late) : "set a date";
+  }
+  function firstStart() { let f = null; walk(state.items, it => { if (!f && !isSplit(it) && it.type === "start") f = it; }); return f; }
+
   function numbering(items) { const map = {}, list = []; walk(items, it => { if (!isSplit(it)) { list.push(it); map[it.id] = list.length; } }); return { map, list }; }
 
   // ---------- Lookup ----------
@@ -311,12 +396,14 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     flow.querySelectorAll("textarea").forEach(autosize);
     document.getElementById("totTime").textContent = fmt(total);
     document.getElementById("totSteps").textContent = n.list.length;
+    updateProjection(total);
     if (typeof markPicked === "function") markPicked();
   }
   function refreshTimes() {
     times = {}; const total = computeTimes(state.items, 0, times);
-    flow.querySelectorAll(".node").forEach(el => { const s = el.querySelector(".starts"); if (s) s.textContent = "starts +" + fmt(times[+el.dataset.id] || 0); });
+    flow.querySelectorAll(".node").forEach(el => { const s = el.querySelector(".starts"); if (s) s.textContent = startsText(+el.dataset.id); });
     document.getElementById("totTime").textContent = fmt(total);
+    updateProjection(total);
   }
 
   function seqHtml(items) {
@@ -348,11 +435,20 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
         <span>or use Branch to draw it as its own chain</span>
       </div>`;
     }
+    const fs = firstStart();
+    if (fs && fs.id === s.id) {
+      row += `<div class="datebox">
+        <span><label for="gStartDate">Start date</label><input type="date" id="gStartDate" data-g="startDate" value="${esc(state.startDate)}"></span>
+        <span><label for="gStartTime">Workday starts</label><input type="time" id="gStartTime" data-g="startTime" value="${esc(state.startTime)}"></span>
+        <span><input type="checkbox" id="gSkipWk" data-g="skipWeekends"${state.skipWeekends ? " checked" : ""}><label for="gSkipWk">Skip weekends</label></span>
+        <span class="fin">Projected finish: <b id="finInStart"></b></span>
+      </div>`;
+    }
     return `<div class="item"><section class="node" data-type="${s.type}" data-id="${s.id}" aria-label="Step ${n}">
       <div class="main">
         <div class="typeline"><span class="stepno">${String(n).padStart(2, "0")}</span>
           <select class="typeSel" data-f="type" aria-label="Shape type for step ${n}">${opts}</select>
-          <span class="starts">starts +${fmt(times[s.id] || 0)}</span></div>
+          <span class="starts">${esc(startsText(s.id))}</span></div>
         <input class="field name" data-f="name" id="n${s.id}" aria-label="Step ${n} name" value="${esc(s.name)}" placeholder="Step name">
         <textarea class="field desc" data-f="desc" id="d${s.id}" rows="1" aria-label="Step ${n} notes" placeholder="Add notes (optional)">${esc(s.desc)}</textarea>
       </div>
@@ -407,7 +503,14 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   const newStep = () => mk("step", "", "", 30, "min");
 
   // ---------- Editing ----------
+  flow.addEventListener("change", e => {
+    const g = e.target.dataset.g;
+    if (!g) return;
+    state[g] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    save(); refreshTimes();
+  });
   flow.addEventListener("input", e => {
+    if (e.target.dataset.g && e.target.type !== "checkbox") { state[e.target.dataset.g] = e.target.value; save(); refreshTimes(); return; }
     const f = e.target.dataset.f;
     if (!f) return;
     const col = e.target.closest(".col"), node = e.target.closest(".node");
@@ -539,7 +642,14 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   // ---------- Copy as text ----------
   document.getElementById("copyText").addEventListener("click", async () => {
     times = {}; const total = computeTimes(state.items, 0, times); nums = numbering(state.items).map;
-    const lines = [state.title, "Longest path: " + fmt(total), ""];
+    const lines = [state.title, "Longest path: " + fmt(total)];
+    const pr = projection(total);
+    if (pr) {
+      lines.push(`Start: ${fmtDate(pr.start, true)}, ${fmtTime(pr.start)}`);
+      lines.push(`Projected completion: ${fmtDate(pr.late, true)}, ${fmtTime(pr.late)}` + (pr.early.getTime() !== pr.late.getTime() ? ` (window ${fmtDate(pr.early)} - ${fmtDate(pr.late)})` : ""));
+      lines.push(`Working calendar: 8-hour days from ${state.startTime}` + (state.skipWeekends ? ", weekdays only" : ", including weekends"));
+    }
+    lines.push("");
     const out = (items, ind) => items.forEach((it, i) => {
       if (isSplit(it)) {
         lines.push(`${ind}Split into ${it.branches.length} chains:`);
@@ -617,7 +727,7 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     function seqH(seq, w) { if (!seq.length) return DIRECT; let h = 0; seq.forEach((_, i) => { h += itemH(seq, i, w) + (i ? GAP : 0); }); return h; }
 
     const contentW = Math.max(612 - 2 * M, minW(items));
-    const W = contentW + 2 * M, BASE_H = 792, HEADER = 82;
+    const W = contentW + 2 * M, BASE_H = 792, HEADER = 120;
 
     // Pack top-level blocks onto pages.
     const pagesPlan = []; let cur = { blocks: [], h: 0 };
@@ -653,7 +763,21 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
         text("LONGEST PATH", M + contentW - 136, y + 8, 8, bold);
         const tot = form.createTextField("total_time"); tot.setText(fmt(total));
         tot.addToPage(page, fo(M + contentW - 136, y + 14, 136, 26)); tot.setFontSize(14);
-        text("Every box is a fillable field. Start times and the longest path were filled in at export; update them if you change durations.", M, y + 56, 7.5);
+        // Dates row
+        const pr = (() => { const s0 = startMoment(); if (!s0) return null; const cal = calendar(); return { start: cal.add(s0, 0, true), late: cal.add(s0, total), early: cal.add(s0, computeMin(items, 0)) }; })();
+        const colW = (contentW - 20) / 3;
+        const dateRow = [
+          ["START DATE", "start_date", pr ? fmtDate(pr.start, true) + ", " + fmtTime(pr.start) : ""],
+          ["PROJECTED COMPLETION (LONGEST PATH)", "projected_completion", pr ? fmtDate(pr.late, true) + ", " + fmtTime(pr.late) : ""],
+          ["COMPLETION WINDOW", "completion_window", pr ? (pr.early.getTime() === pr.late.getTime() ? fmtDate(pr.late) : fmtDate(pr.early) + " - " + fmtDate(pr.late)) : ""]
+        ];
+        dateRow.forEach(([label, fname, val], k) => {
+          const x = M + k * (colW + 10);
+          text(label, x, y + 56, 7, bold);
+          const f = form.createTextField(fname); f.setText(pdfSafe(val));
+          f.addToPage(page, fo(x, y + 61, colW, 20)); f.setFontSize(10.5);
+        });
+        text("Every box is a fillable field. Dates and times were calculated at export (8-hour workdays from " + (state.startTime || "09:00") + (state.skipWeekends ? ", weekdays only" : ", weekends included") + "); update them if you change durations.", M, y + 96, 7.5);
         y += HEADER;
       } else { text(pdfSafe(state.title) + " (continued)", M, y + 10, 10, bold, C.ink); y += 28; }
 
