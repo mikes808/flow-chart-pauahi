@@ -163,6 +163,13 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
 .direct { align-self: center; font-size: 12px; color: var(--muted); font-style: italic; padding: 4px 0; background: var(--bg); position: relative; z-index: 1; }
 .joined { height: 12px; }
 
+.fab { position: fixed; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom)); z-index: 5; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; pointer-events: none; }
+.fab button { pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: #fff; border: none; border-radius: 999px; padding: 12px 18px 12px 14px; font-size: 15px; font-weight: 600; cursor: pointer; box-shadow: 0 6px 18px rgba(16, 24, 40, .22), 0 1px 3px rgba(16, 24, 40, .18); }
+.fab button:hover { filter: brightness(1.08); }
+.fab button span.plus { font-size: 20px; line-height: 1; font-weight: 500; }
+.fab .where { pointer-events: auto; font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; max-width: 70vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node.picked { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.wrap { padding-bottom: 110px; }
 .dialog-back { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
 .dialog-back.open { display: flex; }
 .dialog { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; max-width: 380px; width: 100%; display: flex; flex-direction: column; gap: 14px; }
@@ -202,6 +209,11 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   </div>
 
   <main class="flow" id="flow" aria-label="Flowchart steps"></main>
+</div>
+
+<div class="fab">
+  <span class="where" id="fabWhere" aria-live="polite">Adds at the end</span>
+  <button id="fabAdd" type="button" aria-describedby="fabWhere"><span class="plus" aria-hidden="true">+</span>Add step</button>
 </div>
 
 <div class="dialog-back" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgText">
@@ -299,6 +311,7 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     flow.querySelectorAll("textarea").forEach(autosize);
     document.getElementById("totTime").textContent = fmt(total);
     document.getElementById("totSteps").textContent = n.list.length;
+    if (typeof markPicked === "function") markPicked();
   }
   function refreshTimes() {
     times = {}; const total = computeTimes(state.items, 0, times);
@@ -483,13 +496,42 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   });
 
   document.getElementById("chartTitle").addEventListener("input", e => { state.title = e.target.value; save(); });
-  document.getElementById("addEnd").addEventListener("click", () => {
+  function addAtEnd() {
     let seq = state.items;
     while (seq.length && isSplit(seq[seq.length - 1]) && !seq[seq.length - 1].merge) seq = seq[seq.length - 1].branches[0];
     const n = newStep();
     const last = seq[seq.length - 1];
     if (last && !isSplit(last) && last.type === "end") seq.splice(seq.length - 1, 0, n); else seq.push(n);
-    save(); render(); focusField(n.id, "name");
+    return n;
+  }
+  function showNew(n) {
+    save(); render(); picked = n.id; markPicked();
+    const el = flow.querySelector(`.node[data-id="${n.id}"]`);
+    if (el) { el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); }
+    focusField(n.id, "name");
+  }
+  document.getElementById("addEnd").addEventListener("click", () => { picked = null; showNew(addAtEnd()); });
+
+  // Floating add button: inserts after the step you last clicked into, or at the end.
+  let picked = null;
+  const fabWhere = document.getElementById("fabWhere");
+  function markPicked() {
+    flow.querySelectorAll(".node.picked").forEach(el => el.classList.remove("picked"));
+    const r = picked != null && locate(picked);
+    if (!r) { picked = null; fabWhere.textContent = "Adds at the end"; return; }
+    const el = flow.querySelector(`.node[data-id="${picked}"]`); if (el) el.classList.add("picked");
+    const s = r.item, nm = s.name ? (s.name.length > 28 ? s.name.slice(0, 27) + "…" : s.name) : "Untitled";
+    fabWhere.textContent = s.type === "end" && r.i === r.seq.length - 1 ? `Adds before ${nm}` : `Adds after ${String(nums[s.id]).padStart(2, "0")}. ${nm}`;
+  }
+  flow.addEventListener("focusin", e => { const node = e.target.closest(".node"); if (node && +node.dataset.id !== picked) { picked = +node.dataset.id; markPicked(); } });
+  flow.addEventListener("pointerdown", e => { const node = e.target.closest(".node"); if (node && +node.dataset.id !== picked) { picked = +node.dataset.id; markPicked(); } });
+  document.getElementById("fabAdd").addEventListener("click", () => {
+    const r = picked != null && locate(picked);
+    if (!r) { showNew(addAtEnd()); return; }
+    const n = newStep();
+    const after = r.item.type === "end" && r.i === r.seq.length - 1 ? r.i : r.i + 1; // never add below an End step
+    r.seq.splice(after, 0, n);
+    showNew(n);
   });
 
   const toast = (msg, err) => { const t = document.getElementById("toast"); t.textContent = msg; t.classList.toggle("err", !!err); clearTimeout(toast.h); toast.h = setTimeout(() => t.textContent = "", 4500); };
