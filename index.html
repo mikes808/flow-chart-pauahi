@@ -500,7 +500,7 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   }
   function autosize(el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
   function focusField(id, f) { const el = flow.querySelector(`.node[data-id="${id}"] [data-f="${f}"]`); if (el) el.focus(); }
-  const newStep = () => mk("step", "", "", 30, "min");
+  const newStep = () => mk("step", "", "", 1, "wk");
 
   // ---------- Editing ----------
   flow.addEventListener("change", e => {
