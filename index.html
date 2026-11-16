@@ -185,6 +185,17 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
 .dialog { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; max-width: 380px; width: 100%; display: flex; flex-direction: column; gap: 14px; }
 .dialog p { margin: 0; }
 .dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
+.dialog.wide { max-width: 480px; }
+.dialog h3 { margin: 0; font-size: 17px; }
+.histlist { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; }
+.histrow { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.histrow .hi { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.histrow .hw { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.histrow .hm { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.histnote { font-size: 12px; color: var(--muted); margin: 0; }
+.histmsg { font-size: 13px; margin: 0; min-height: 1.2em; color: var(--start); }
+.histmsg.err { color: var(--end); }
+.btn.small { font-size: 13px; padding: 4px 10px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
@@ -207,6 +218,7 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     <button class="btn primary" id="exportPdf" type="button">Export fillable PDF</button>
     <label class="chk"><input type="checkbox" id="blankSlots" checked> Add 3 blank steps to the PDF</label>
     <button class="btn" id="copyText" type="button">Copy as text</button>
+    <button class="btn" id="histBtn" type="button">History</button>
     <button class="btn" id="resetBtn" type="button">Reset template</button>
     <span class="toast" id="toast" role="status"></span>
     <span class="spacer"></span>
@@ -225,6 +237,17 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
 <div class="fab">
   <span class="where" id="fabWhere" aria-live="polite">Adds at the end</span>
   <button id="fabAdd" type="button" aria-describedby="fabWhere"><span class="plus" aria-hidden="true">+</span>Add step</button>
+</div>
+
+<div class="dialog-back" id="histDlg" role="dialog" aria-modal="true" aria-labelledby="histTitle">
+  <div class="dialog wide">
+    <h3 id="histTitle">Version history</h3>
+    <p class="histnote">A version is kept automatically about every 10 minutes while the flowchart is being edited. Restoring one keeps the current flowchart as a version first, so you can always go back.</p>
+    <div><button class="btn" id="histSave" type="button">Save a version now</button></div>
+    <p class="histmsg" id="histMsg" role="status"></p>
+    <div class="histlist" id="histList"></div>
+    <div class="btns"><button class="btn" id="histClose" type="button">Done</button></div>
+  </div>
 </div>
 
 <div class="dialog-back" id="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgText">
@@ -284,7 +307,31 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
     if (s.skipWeekends === undefined) s.skipWeekends = true;
     return s;
   }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  // ---------- Version history (kept in this browser) ----------
+  const HKEY = "flowchart-history-v1", TKEY = KEY + "-saved-at", AUTO_EVERY = 10 * 60 * 1000, KEEP = 40;
+  function readHist() { try { const h = JSON.parse(localStorage.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch (e) { return []; } }
+  function writeHist(h) {
+    h = h.slice(0, KEEP);
+    for (;;) { try { localStorage.setItem(HKEY, JSON.stringify(h)); return true; } catch (e) { if (h.length <= 1) return false; h = h.slice(0, Math.ceil(h.length / 2)); } }
+  }
+  // json = the flowchart as saved text; asOf = when it was the current one.
+  function addVersion(json, kind, asOf) {
+    let st; try { st = JSON.parse(json); } catch (e) { return false; }
+    if (!st || !Array.isArray(st.items)) return false;
+    const h = readHist();
+    h.unshift({ id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), kind, asOf: asOf || Date.now(), taken: Date.now(), title: st.title || "Untitled", state: st });
+    return writeHist(h);
+  }
+  function save() {
+    try {
+      const now = Date.now(), next = JSON.stringify(state), prev = localStorage.getItem(KEY);
+      if (prev && prev !== next) {
+        const lastAuto = readHist().find(v => v.kind === "auto");
+        if (!lastAuto || now - lastAuto.taken > AUTO_EVERY) addVersion(prev, "auto", +localStorage.getItem(TKEY) || now);
+      }
+      localStorage.setItem(KEY, next); localStorage.setItem(TKEY, String(now));
+    } catch (e) {}
+  }
 
   // ---------- Time ----------
   const minutes = s => (parseFloat(s.dur) || 0) * (UNITS[s.unit] || 1);
@@ -676,10 +723,38 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
   document.getElementById("dlgYes").addEventListener("click", () => {
     dlg.classList.remove("open");
     if (pendingChain) { removeChain(pendingChain.split, pendingChain.bi); pendingChain = null; save(); render(); toast("Chain deleted"); return; }
-    try { localStorage.removeItem(KEY); localStorage.removeItem(OLD_KEY); } catch (e) {}
-    state = load(); render(); toast("Template restored");
+    try { addVersion(JSON.stringify(state), "restore"); localStorage.removeItem(KEY); localStorage.removeItem(OLD_KEY); } catch (e) {}
+    state = load(); render(); toast("Template restored. Your previous flowchart is in History.");
   });
-  document.addEventListener("keydown", e => { if (e.key === "Escape") dlg.classList.remove("open"); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") { dlg.classList.remove("open"); histDlg.classList.remove("open"); } });
+
+  // ---------- History dialog ----------
+  const histDlg = document.getElementById("histDlg"), histList = document.getElementById("histList");
+  const histMsg = (t, err) => { const m = document.getElementById("histMsg"); m.textContent = t || ""; m.classList.toggle("err", !!err); };
+  const KIND = { auto: "Saved automatically", manual: "Saved by you", restore: "Kept before a restore or reset" };
+  const whenText = t => new Date(t).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  function countSteps(items) { let n = 0; walk(items || [], it => { if (!isSplit(it)) n++; }); return n; }
+  function renderHist() {
+    const h = readHist();
+    histList.innerHTML = h.length ? h.map(v => `<div class="histrow"><div class="hi"><span class="hw">${esc(whenText(v.asOf))}</span>
+      <span class="hm">${esc(KIND[v.kind] || "Saved")} · ${esc(v.title)} · ${countSteps(v.state.items)} steps</span></div>
+      <button class="btn small" data-v="${esc(v.id)}" type="button">Restore</button></div>`).join("")
+      : `<p class="histnote">No earlier versions yet. They appear here as you edit.</p>`;
+  }
+  document.getElementById("histBtn").addEventListener("click", () => { histMsg(""); renderHist(); histDlg.classList.add("open"); document.getElementById("histClose").focus(); });
+  document.getElementById("histClose").addEventListener("click", () => histDlg.classList.remove("open"));
+  document.getElementById("histSave").addEventListener("click", () => {
+    const ok = addVersion(JSON.stringify(state), "manual");
+    histMsg(ok ? "Version saved." : "Couldn't save a version: this browser's storage is full or blocked.", !ok); renderHist();
+  });
+  histList.addEventListener("click", e => {
+    const b = e.target.closest("button[data-v]"); if (!b) return;
+    const v = readHist().find(x => x.id === b.dataset.v); if (!v) return;
+    addVersion(JSON.stringify(state), "restore");
+    state = withDefaults(JSON.parse(JSON.stringify(v.state))); uid = maxId(state.items) + 1; picked = null;
+    try { localStorage.setItem(KEY, JSON.stringify(state)); localStorage.setItem(TKEY, String(Date.now())); } catch (err) {}
+    render(); histDlg.classList.remove("open"); toast("Restored the version from " + whenText(v.asOf) + ".");
+  });
 
   // ---------- Fillable PDF export ----------
   let downloadsP = null;
