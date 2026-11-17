@@ -71,6 +71,8 @@ button, select, input, textarea { font-family: inherit; font-size: 14px; color: 
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { filter: brightness(1.08); color: #fff; }
 .btn:disabled { opacity: .6; cursor: progress; }
+#undoBtn:disabled, #redoBtn:disabled { opacity: .45; cursor: default; }
+body.readonly #undoBtn, body.readonly #redoBtn { display: none !important; }
 .toolbar .spacer { flex: 1; }
 .chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
 .toast { font-size: 13px; color: var(--start); min-height: 1em; }
@@ -229,6 +231,8 @@ body.readonly .icon.unpin { display: none; }
     <button class="btn" id="addEnd" type="button">+ Add step</button>
     <button class="btn primary" id="exportPdf" type="button">Export fillable PDF</button>
     <label class="chk"><input type="checkbox" id="blankSlots" checked> Add 3 blank steps to the PDF</label>
+        <button class="btn" id="undoBtn" type="button" title="Undo (Ctrl+Z or Cmd+Z)" disabled>&#8617; Undo</button>
+    <button class="btn" id="redoBtn" type="button" title="Redo (Ctrl+Shift+Z or Cmd+Shift+Z)" disabled>&#8618; Redo</button>
     <button class="btn" id="copyText" type="button">Copy as text</button>
     <button class="btn" id="histBtn" type="button">History</button>
     <button class="btn" id="resetBtn" type="button">Reset template</button>
@@ -349,7 +353,8 @@ body.readonly .icon.unpin { display: none; }
     h.unshift({ id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), kind, asOf: asOf || Date.now(), taken: Date.now(), title: st.title || "Untitled", state: st });
     return writeHist(h);
   }
-  function save() {
+  function save() { trackUndo(); persistOnly(); }
+  function persistOnly() {
     try {
       const now = Date.now(), next = JSON.stringify(state), prev = localStorage.getItem(KEY);
       if (prev && prev !== next) {
@@ -739,6 +744,49 @@ body.readonly .icon.unpin { display: none; }
     toast(count === 1 ? "Moved to chain " + letter(to) + "." : "Moved " + count + " steps to chain " + letter(to) + ".");
   });
 
+  // ---------- Undo / redo ----------
+  const undoStack = [], redoStack = [];
+  let lastJson = null, lastPush = 0;
+  function updateUndoButtons() {
+    const u = document.getElementById("undoBtn"), r = document.getElementById("redoBtn");
+    if (u) u.disabled = !undoStack.length;
+    if (r) r.disabled = !redoStack.length;
+  }
+  function trackUndo() {
+    const next = JSON.stringify(state);
+    if (lastJson !== null && next !== lastJson) {
+      const now = Date.now();
+      // Quick bursts (typing) collapse into one undo step.
+      if (now - lastPush > 800 || !undoStack.length) { undoStack.push(lastJson); if (undoStack.length > 100) undoStack.shift(); }
+      lastPush = now;
+      redoStack.length = 0;
+    }
+    lastJson = next;
+    updateUndoButtons();
+  }
+  function applySnapshot(json) {
+    state = withDefaults(JSON.parse(json));
+    uid = maxId(state.items) + 1;
+    lastJson = json; lastPush = 0; picked = null;
+    persistOnly(); render(); updateUndoButtons();
+  }
+  function undo() { if (undoStack.length) { redoStack.push(JSON.stringify(state)); applySnapshot(undoStack.pop()); toast("Undone."); } }
+  function redo() { if (redoStack.length) { undoStack.push(JSON.stringify(state)); applySnapshot(redoStack.pop()); toast("Redone."); } }
+  document.getElementById("undoBtn").addEventListener("click", undo);
+  document.getElementById("redoBtn").addEventListener("click", redo);
+  document.addEventListener("keydown", e => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k !== "z" && k !== "y") return;
+    if (document.body.classList.contains("readonly")) return;
+    if (document.querySelector(".dialog-back.open")) return;
+    const t = e.target, tag = t && t.tagName;
+    // Inside a text box, leave the browser's own text undo alone; it syncs back to the chart.
+    if (tag === "TEXTAREA" || (tag === "INPUT" && ["text", "number", "email", "password", "search", ""].includes(t.type || ""))) return;
+    e.preventDefault();
+    if (k === "y" || e.shiftKey) redo(); else undo();
+  });
+
   flow.addEventListener("click", e => {
     const b = e.target.closest("button[data-a]");
     if (!b) return;
@@ -845,7 +893,7 @@ body.readonly .icon.unpin { display: none; }
     dlg.classList.remove("open");
     if (pendingChain) { removeChain(pendingChain.split, pendingChain.bi); pendingChain = null; save(); render(); toast("Chain deleted"); return; }
     try { addVersion(JSON.stringify(state), "restore"); localStorage.removeItem(KEY); localStorage.removeItem(OLD_KEY); } catch (e) {}
-    state = load(); render(); toast("Template restored. Your previous flowchart is in History.");
+    state = load(); trackUndo(); render(); toast("Template restored. Your previous flowchart is in History.");
   });
   document.addEventListener("keydown", e => { if (e.key === "Escape") { dlg.classList.remove("open"); histDlg.classList.remove("open"); moveDlg.classList.remove("open"); } });
 
@@ -874,7 +922,7 @@ body.readonly .icon.unpin { display: none; }
     addVersion(JSON.stringify(state), "restore");
     state = withDefaults(JSON.parse(JSON.stringify(v.state))); uid = maxId(state.items) + 1; picked = null;
     try { localStorage.setItem(KEY, JSON.stringify(state)); localStorage.setItem(TKEY, String(Date.now())); } catch (err) {}
-    render(); histDlg.classList.remove("open"); toast("Restored the version from " + whenText(v.asOf) + ".");
+    trackUndo(); render(); histDlg.classList.remove("open"); toast("Restored the version from " + whenText(v.asOf) + ".");
   });
 
   // ---------- Fillable PDF export ----------
@@ -1134,6 +1182,7 @@ body.readonly .icon.unpin { display: none; }
   window.__fc = { get state() { return state; }, buildPdf, render, branchFrom, applyRejoin, removeChain, locate };
   state = load();
   render();
+  lastJson = JSON.stringify(state); updateUndoButtons();
 })();
 </script>
 </body>
