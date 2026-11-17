@@ -37,6 +37,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.45; }
 .wrap { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; display: flex; flex-direction: column; gap: 20px; }
@@ -193,6 +194,9 @@ body.readonly .icon.unpin { display: none; }
 .dialog { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; max-width: 380px; width: 100%; display: flex; flex-direction: column; gap: 14px; }
 .dialog p { margin: 0; }
 .dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
+.movebody { display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.movebody label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.movebody select { font-size: 14px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); max-width: 100%; }
 .dialog.wide { max-width: 480px; }
 .dialog h3 { margin: 0; font-size: 17px; }
 .histlist { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; }
@@ -255,6 +259,21 @@ body.readonly .icon.unpin { display: none; }
     <p class="histmsg" id="histMsg" role="status"></p>
     <div class="histlist" id="histList"></div>
     <div class="btns"><button class="btn" id="histClose" type="button">Done</button></div>
+  </div>
+</div>
+
+<div class="dialog-back" id="moveDlg" role="dialog" aria-modal="true" aria-labelledby="moveWhat">
+  <div class="dialog">
+    <p id="moveWhat">Move this step to:</p>
+    <div class="movebody">
+      <label>Destination <select id="moveDest" aria-label="Destination chain"></select></label>
+      <label>Place it <select id="movePos" aria-label="Where in that chain"><option value="end">at the end of that chain</option><option value="start">at the start of that chain</option></select></label>
+      <label id="moveGroupWrap"><input type="checkbox" id="moveGroup"> <span id="moveGroupLbl"></span></label>
+    </div>
+    <div class="btns">
+      <button class="btn" id="moveNo" type="button">Cancel</button>
+      <button class="btn primary" id="moveYes" type="button">Move</button>
+    </div>
   </div>
 </div>
 
@@ -504,10 +523,10 @@ body.readonly .icon.unpin { display: none; }
     updateProjection(total);
   }
 
-  function seqHtml(items) {
+  function seqHtml(items, inChain) {
     let html = "";
     items.forEach((it, i) => {
-      html += isSplit(it) ? splitHtml(it, items, i) : nodeHtml(it, items, i);
+      html += isSplit(it) ? splitHtml(it, items, i) : nodeHtml(it, items, i, inChain);
       const next = items[i + 1];
       if (next && !(isSplit(it) && !it.merge)) {
         const plain = isSplit(next);
@@ -518,7 +537,7 @@ body.readonly .icon.unpin { display: none; }
     return html;
   }
 
-  function nodeHtml(s, seq, i) {
+  function nodeHtml(s, seq, i, inChain) {
     const n = nums[s.id];
     const opts = Object.keys(TYPES).map(k => `<option value="${k}"${k === s.type ? " selected" : ""}>${TYPES[k]}</option>`).join("");
     const units = Object.keys(UNITS).map(k => `<option value="${k}"${k === s.unit ? " selected" : ""}>${UNIT_LABEL[k]}</option>`).join("");
@@ -558,6 +577,7 @@ body.readonly .icon.unpin { display: none; }
           <select id="un${s.id}" data-f="unit" aria-label="Duration unit">${units}</select></div>
         <div class="actions">
           <button class="icon br" data-a="branch" type="button" title="Start another chain from this step" aria-label="Branch from step ${n}">${BRANCH_SVG}Branch</button>
+          ${inChain ? `<button class="icon mv" data-a="move" type="button" title="Move to another chain" aria-label="Move step ${n} to another chain">&#8644;</button>` : ""}
           <button class="icon" data-a="up" type="button" title="Move up" aria-label="Move step ${n} up">↑</button>
           <button class="icon" data-a="down" type="button" title="Move down" aria-label="Move step ${n} down">↓</button>
           <button class="icon" data-a="dup" type="button" title="Duplicate" aria-label="Duplicate step ${n}">⧉</button>
@@ -585,7 +605,7 @@ body.readonly .icon.unpin { display: none; }
         <div class="colhead"><input data-f="label" aria-label="Chain ${letter(bi)} label" value="${esc(sp.labels[bi] || "Path " + letter(bi))}">
           <button class="icon del" data-a="delchain" type="button" title="Delete this chain and its steps" aria-label="Delete chain ${letter(bi)}">✕</button></div>
         <div class="arrowstem"></div>
-        ${b.length ? `<div class="seq">${seqHtml(b)}</div>` : `<div class="direct">Direct path (no steps)</div>`}
+        ${b.length ? `<div class="seq">${seqHtml(b, true)}</div>` : `<div class="direct">Direct path (no steps)</div>`}
         <div class="tail">${b.length && isSplit(b[b.length - 1]) && !b[b.length - 1].merge ? "" : `<button class="addend" data-a="addend" type="button">+ Step in this chain</button>`}</div>
       </div>`).join("");
     return `<div class="split${sp.merge ? " merged" : ""}" data-split="${sp.id}">
@@ -682,6 +702,43 @@ body.readonly .icon.unpin { display: none; }
     if (sp.branches.length === 1) seq.splice(i, 1, ...sp.branches[0]);
   }
 
+  // ---------- Move a step (or it and those after it) to another chain ----------
+  const moveDlg = document.getElementById("moveDlg");
+  let movePending = null;
+  function openMove(id) {
+    const r = locate(id);
+    if (!r || !r.parent) { toast("This step isn't inside a chain."); return; }
+    const sp = r.parent.split, from = r.parent.bi, below = r.seq.length - r.i - 1;
+    movePending = id;
+    document.getElementById("moveWhat").textContent = `Move "${r.item.name || "Untitled"}" to:`;
+    document.getElementById("moveDest").innerHTML = sp.branches.map((b, k) => k === from ? "" :
+      `<option value="${k}">Chain ${letter(k)} - ${esc(sp.labels[k] || "Path " + letter(k))}${b.length ? "" : " (empty)"}</option>`).join("");
+    document.getElementById("movePos").value = "end";
+    const g = document.getElementById("moveGroupWrap");
+    g.hidden = !below;
+    document.getElementById("moveGroup").checked = false;
+    document.getElementById("moveGroupLbl").textContent = below === 1 ? "Also move the step after it in this chain" : `Also move the ${below} steps after it in this chain`;
+    moveDlg.classList.add("open");
+    document.getElementById("moveDest").focus();
+  }
+  document.getElementById("moveNo").addEventListener("click", () => { movePending = null; moveDlg.classList.remove("open"); });
+  document.getElementById("moveYes").addEventListener("click", () => {
+    const id = movePending; movePending = null;
+    moveDlg.classList.remove("open");
+    if (id == null) return;
+    const r = locate(id);
+    if (!r || !r.parent) return;
+    const sp = r.parent.split, to = +document.getElementById("moveDest").value;
+    if (!sp.branches[to] || to === r.parent.bi) return;
+    const count = !document.getElementById("moveGroupWrap").hidden && document.getElementById("moveGroup").checked ? r.seq.length - r.i : 1;
+    const moved = r.seq.splice(r.i, count);
+    if (document.getElementById("movePos").value === "start") sp.branches[to].unshift(...moved); else sp.branches[to].push(...moved);
+    save(); render();
+    const el = flow.querySelector(`.node[data-id="${id}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
+    toast(count === 1 ? "Moved to chain " + letter(to) + "." : "Moved " + count + " steps to chain " + letter(to) + ".");
+  });
+
   flow.addEventListener("click", e => {
     const b = e.target.closest("button[data-a]");
     if (!b) return;
@@ -692,6 +749,7 @@ body.readonly .icon.unpin { display: none; }
     if (a === "delchain") { const col = b.closest(".col"); pendingChain = { split: +col.dataset.split, bi: +col.dataset.bi }; openDialog("Delete this chain and every step in it?", "Delete chain"); return; }
     const id = +b.closest(".node").dataset.id;
     const { seq, i, item } = locate(id);
+    if (a === "move") { openMove(id); return; }
     if (a === "branch") { const nid = branchFrom(id); save(); render(); focusField(nid, "name"); toast("Added a chain. Use the Split menu to choose where the chains rejoin."); return; }
     if (a === "up") {
       if (i === 0) { toast("This is already the first step in its chain."); return; }
@@ -789,7 +847,7 @@ body.readonly .icon.unpin { display: none; }
     try { addVersion(JSON.stringify(state), "restore"); localStorage.removeItem(KEY); localStorage.removeItem(OLD_KEY); } catch (e) {}
     state = load(); render(); toast("Template restored. Your previous flowchart is in History.");
   });
-  document.addEventListener("keydown", e => { if (e.key === "Escape") { dlg.classList.remove("open"); histDlg.classList.remove("open"); } });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") { dlg.classList.remove("open"); histDlg.classList.remove("open"); moveDlg.classList.remove("open"); } });
 
   // ---------- History dialog ----------
   const histDlg = document.getElementById("histDlg"), histList = document.getElementById("histList");
